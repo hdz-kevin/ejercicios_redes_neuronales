@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flower Classifier</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #111827;
+        --card: #1f2937;
+        --muted: #94a3b8;
+        --text: #e5e7eb;
+        --accent: #34d399;
+        --danger: #f87171;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Arial, sans-serif;
+        background: linear-gradient(135deg, #020817, #111827);
+        color: var(--text);
+      }
+      .container {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px 20px 60px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(2rem, 4vw, 3rem);
+      }
+      .subtitle {
+        color: var(--muted);
+        margin-bottom: 24px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 24px;
+      }
+      .panel {
+        background: rgba(17, 24, 39, 0.9);
+        border: 1px solid rgba(148, 163, 184, 0.15);
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.22);
+      }
+      video, canvas {
+        width: 100%;
+        border-radius: 12px;
+        background: #000;
+        display: block;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 16px;
+      }
+      button {
+        border: none;
+        border-radius: 10px;
+        background: var(--accent);
+        color: #062b1b;
+        padding: 12px 16px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #e2e8f0;
+        color: #0f172a;
+      }
+      .result {
+        margin-top: 18px;
+        padding: 16px;
+        border-radius: 12px;
+        background: rgba(15, 23, 42, 0.8);
+      }
+      .result strong {
+        font-size: 1.2rem;
+      }
+      .confidence {
+        color: var(--muted);
+        margin-top: 8px;
+      }
+      .top-k {
+        margin-top: 12px;
+        padding: 0;
+        list-style: none;
+      }
+      .top-k li {
+        display: flex;
+        justify-content: space-between;
+        padding: 6px 0;
+        border-bottom: 1px solid rgba(148,163,184,.2);
+      }
+      .status {
+        color: var(--muted);
+        margin-top: 12px;
+        min-height: 24px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Flower Classifier</h1>
+      <div class="subtitle">Predicción desde la cámara del navegador usando el modelo entrenado.</div>
+
+      <div class="grid">
+        <div class="panel">
+          <video id="video" autoplay playsinline muted></video>
+          <div class="controls">
+            <button id="startCamera">Activar cámara</button>
+            <button id="capture" class="secondary">Tomar foto</button>
+          </div>
+          <div class="status" id="status">Cámara no iniciada.</div>
+        </div>
+
+        <div class="panel">
+          <canvas id="canvas" width="180" height="180"></canvas>
+          <div class="result" id="result">
+            <strong>Esperando imagen...</strong>
+            <div class="confidence">La clasificación aparecerá aquí.</div>
+            <ul class="top-k" id="topk"></ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const video = document.getElementById('video');
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      const statusEl = document.getElementById('status');
+      const resultEl = document.getElementById('result');
+      const topkEl = document.getElementById('topk');
+
+      async function startCamera() {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+          video.srcObject = stream;
+          statusEl.textContent = 'Cámara activada.';
+        } catch (error) {
+          statusEl.textContent = 'No se pudo acceder a la cámara: ' + error.message;
+        }
+      }
+
+      function drawFrameToCanvas() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      }
+
+      async function classifyCurrentFrame() {
+        drawFrameToCanvas();
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+        const blob = await fetch(dataUrl).then((res) => res.blob());
+
+        const formData = new FormData();
+        formData.append('file', blob, 'capture.jpg');
+
+        statusEl.textContent = 'Clasificando...';
+
+        const response = await fetch('/predict', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ detail: 'Error desconocido' }));
+          throw new Error(errorData.detail || 'Error en la predicción');
+        }
+
+        const data = await response.json();
+        const best = data.top_prediction || data;
+        resultEl.innerHTML = `
+          <strong>${best.label}</strong>
+          <div class="confidence">Confianza: ${(best.confidence * 100).toFixed(1)}%</div>
+          <ul class="top-k">
+            ${(data.top_k || []).map((item) => `
+              <li><span>${item.label}</span><span>${(item.confidence * 100).toFixed(1)}%</span></li>
+            `).join('')}
+          </ul>
+        `;
+        statusEl.textContent = 'Predicción completada.';
+      }
+
+      document.getElementById('startCamera').addEventListener('click', startCamera);
+      document.getElementById('capture').addEventListener('click', async () => {
+        if (!video.srcObject) {
+          statusEl.textContent = 'Primero activa la cámara.';
+          return;
+        }
+        try {
+          await classifyCurrentFrame();
+        } catch (error) {
+          statusEl.textContent = error.message;
+        }
+      });
+    </script>
+  </body>
+</html>
