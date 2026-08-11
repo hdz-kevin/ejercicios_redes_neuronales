@@ -52,6 +52,10 @@
         background: #000;
         display: block;
       }
+      canvas {
+        max-height: 420px;
+        object-fit: contain;
+      }
       .controls {
         display: flex;
         flex-wrap: wrap;
@@ -112,13 +116,12 @@
           <video id="video" autoplay playsinline muted></video>
           <div class="controls">
             <button id="startCamera">Activar cámara</button>
-            <button id="capture" class="secondary">Tomar foto</button>
           </div>
           <div class="status" id="status">Cámara no iniciada.</div>
         </div>
 
         <div class="panel">
-          <canvas id="canvas" width="180" height="180"></canvas>
+          <canvas id="canvas"></canvas>
           <div class="result" id="result">
             <strong>Esperando imagen...</strong>
             <div class="confidence">La clasificación aparecerá aquí.</div>
@@ -132,71 +135,110 @@
       const video = document.getElementById('video');
       const canvas = document.getElementById('canvas');
       const ctx = canvas.getContext('2d');
+      const processingCanvas = document.createElement('canvas');
+      const processingCtx = processingCanvas.getContext('2d');
       const statusEl = document.getElementById('status');
       const resultEl = document.getElementById('result');
-      const topkEl = document.getElementById('topk');
+      const startCameraButton = document.getElementById('startCamera');
+
+      let liveIntervalId = null;
+      let predicting = false;
 
       async function startCamera() {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment' },
+            audio: false,
+          });
+
           video.srcObject = stream;
-          statusEl.textContent = 'Cámara activada.';
+          statusEl.textContent = 'Cámara activada. Predicción en vivo lista.';
+          startCameraButton.textContent = 'Cámara activa';
+          startCameraButton.disabled = true;
+          startLivePrediction();
         } catch (error) {
           statusEl.textContent = 'No se pudo acceder a la cámara: ' + error.message;
         }
       }
 
       function drawFrameToCanvas() {
+        const width = video.videoWidth || 1280;
+        const height = video.videoHeight || 720;
+
+        canvas.width = width;
+        canvas.height = height;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       }
 
-      async function classifyCurrentFrame() {
-        drawFrameToCanvas();
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
-        const blob = await fetch(dataUrl).then((res) => res.blob());
-
-        const formData = new FormData();
-        formData.append('file', blob, 'capture.jpg');
-
-        statusEl.textContent = 'Clasificando...';
-
-        const response = await fetch('/predict', {
-          method: 'POST',
-          body: formData,
-        });
-
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({ detail: 'Error desconocido' }));
-          throw new Error(errorData.detail || 'Error en la predicción');
-        }
-
-        const data = await response.json();
-        const best = data.top_prediction || data;
-        resultEl.innerHTML = `
-          <strong>${best.label}</strong>
-          <div class="confidence">Confianza: ${(best.confidence * 100).toFixed(1)}%</div>
-          <ul class="top-k">
-            ${(data.top_k || []).map((item) => `
-              <li><span>${item.label}</span><span>${(item.confidence * 100).toFixed(1)}%</span></li>
-            `).join('')}
-          </ul>
-        `;
-        statusEl.textContent = 'Predicción completada.';
+      function buildProcessingFrame() {
+        processingCanvas.width = 180;
+        processingCanvas.height = 180;
+        processingCtx.clearRect(0, 0, processingCanvas.width, processingCanvas.height);
+        processingCtx.drawImage(video, 0, 0, processingCanvas.width, processingCanvas.height);
+        return processingCanvas.toDataURL('image/jpeg', 0.9);
       }
 
-      document.getElementById('startCamera').addEventListener('click', startCamera);
-      document.getElementById('capture').addEventListener('click', async () => {
+      async function classifyCurrentFrame() {
+        if (!video.srcObject || predicting) {
+          return;
+        }
+
+        predicting = true;
+        drawFrameToCanvas();
+
+        const dataUrl = buildProcessingFrame();
+        const blob = await fetch(dataUrl).then((res) => res.blob());
+        const formData = new FormData();
+        formData.append('file', blob, 'live-frame.jpg');
+
+        try {
+          statusEl.textContent = 'Clasificando frame...';
+          const response = await fetch('/predict', {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: 'Error desconocido' }));
+            throw new Error(errorData.detail || 'Error en la predicción');
+          }
+
+          const data = await response.json();
+          const best = data.top_prediction || data;
+          resultEl.innerHTML = `
+            <strong>${best.label}</strong>
+            <div class="confidence">Confianza: ${(best.confidence * 100).toFixed(1)}%</div>
+            <ul class="top-k">
+              ${(data.top_k || []).map((item) => `
+                <li><span>${item.label}</span><span>${(item.confidence * 100).toFixed(1)}%</span></li>
+              `).join('')}
+            </ul>
+          `;
+          statusEl.textContent = 'Predicción en vivo activa.';
+        } catch (error) {
+          statusEl.textContent = error.message;
+        } finally {
+          predicting = false;
+        }
+      }
+
+      function startLivePrediction() {
+        if (liveIntervalId) {
+          clearInterval(liveIntervalId);
+        }
+
         if (!video.srcObject) {
           statusEl.textContent = 'Primero activa la cámara.';
           return;
         }
-        try {
-          await classifyCurrentFrame();
-        } catch (error) {
-          statusEl.textContent = error.message;
-        }
-      });
+
+        liveIntervalId = setInterval(() => {
+          classifyCurrentFrame();
+        }, 24);
+      }
+
+      startCameraButton.addEventListener('click', startCamera);
     </script>
   </body>
 </html>
